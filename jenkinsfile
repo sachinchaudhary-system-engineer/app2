@@ -8,14 +8,11 @@ pipeline {
         skipDefaultCheckout(true)
     }
 
-    tools {
-        sonarRunner 'sonarqube-scanner'
-    }
-
     environment {
-        APP_NAME = 'app2'
-        IMAGE_TAG = "${BUILD_NUMBER}"
+        APP_NAME   = 'app2'
+        IMAGE_TAG  = "${BUILD_NUMBER}"
         DOCKER_REPO = 'chaudharysachin/app2'
+        K8S_NAMESPACE = 'jenkins'
     }
 
     stages {
@@ -29,11 +26,16 @@ pipeline {
 
         stage('SonarQube Scan') {
             steps {
-                withSonarQubeEnv('SonarQube') {
-                    sh '''
-                        echo "Starting SonarQube analysis..."
-                        sonar-scanner
-                    '''
+                script {
+                    def scannerHome = tool 'sonarqube-scanner'
+
+                    withSonarQubeEnv('SonarQube') {
+                        sh """
+                            echo "Starting SonarQube analysis..."
+
+                            ${scannerHome}/bin/sonar-scanner
+                        """
+                    }
                 }
             }
         }
@@ -49,8 +51,10 @@ pipeline {
         stage('Manual Approval') {
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
-                    input message: 'SonarQube Quality Gate passed. Proceed with Docker build and deployment?',
-                          ok: 'Approve'
+                    input(
+                        message: 'SonarQube Quality Gate passed. Continue deployment?',
+                        ok: 'Approve Deployment'
+                    )
                 }
             }
         }
@@ -83,7 +87,7 @@ pipeline {
                             -u "$DOCKER_USERNAME" \
                             --password-stdin
 
-                        echo "Pushing Docker image..."
+                        echo "Pushing image..."
 
                         docker push ${DOCKER_REPO}:${IMAGE_TAG}
 
@@ -93,34 +97,42 @@ pipeline {
             }
         }
 
-        stage('Deploy to Kubernetes') {
+        stage('Deploy') {
             steps {
                 sh '''
-                    echo "Starting Kubernetes deployment..."
+                    echo "Deploying application..."
 
-                    kubectl apply -f k8s/
+                    kubectl apply -f k8s/ -n ${K8S_NAMESPACE}
 
                     kubectl set image deployment/deployment-2 \
                         container-2=${DOCKER_REPO}:${IMAGE_TAG} \
-                        -n jenkins
+                        -n ${K8S_NAMESPACE}
 
                     kubectl rollout status deployment/deployment-2 \
-                        -n jenkins \
+                        -n ${K8S_NAMESPACE} \
                         --timeout=5m
                 '''
             }
         }
 
-        stage('Verify Deployment') {
+        stage('Verify') {
             steps {
                 sh '''
-                    echo "Checking deployment..."
+                    echo "Deployment status:"
 
-                    kubectl get deployment deployment-2 -n jenkins
-                    kubectl get pods -n jenkins -o wide
-                    kubectl get svc -n jenkins
-                    kubectl get ingress -n jenkins
-                    kubectl get hpa -n jenkins
+                    kubectl get deployment deployment-2 -n ${K8S_NAMESPACE}
+
+                    echo "Pods:"
+                    kubectl get pods -n ${K8S_NAMESPACE} -o wide
+
+                    echo "Service:"
+                    kubectl get svc -n ${K8S_NAMESPACE}
+
+                    echo "Ingress:"
+                    kubectl get ingress -n ${K8S_NAMESPACE}
+
+                    echo "HPA:"
+                    kubectl get hpa -n ${K8S_NAMESPACE}
                 '''
             }
         }
@@ -138,12 +150,6 @@ pipeline {
 
         aborted {
             echo 'Pipeline was aborted.'
-        }
-
-        always {
-            sh '''
-                docker logout || true
-            '''
         }
     }
 }
