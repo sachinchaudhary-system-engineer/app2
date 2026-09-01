@@ -1,0 +1,149 @@
+pipeline {
+
+    agent {
+        label 'agent-1'
+    }
+
+    options {
+        skipDefaultCheckout(true)
+    }
+
+    tools {
+        sonarRunner 'sonarqube-scanner'
+    }
+
+    environment {
+        APP_NAME = 'app2'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        DOCKER_REPO = 'chaudharysachin/app2'
+    }
+
+    stages {
+
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/sachinchaudhary-system-engineer/app2.git'
+            }
+        }
+
+        stage('SonarQube Scan') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh '''
+                        echo "Starting SonarQube analysis..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Manual Approval') {
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input message: 'SonarQube Quality Gate passed. Proceed with Docker build and deployment?',
+                          ok: 'Approve'
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    echo "Building Docker image..."
+
+                    docker build \
+                        -t ${DOCKER_REPO}:${IMAGE_TAG} \
+                        .
+                '''
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker-cred',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        echo "Logging into Docker Hub..."
+
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            -u "$DOCKER_USERNAME" \
+                            --password-stdin
+
+                        echo "Pushing Docker image..."
+
+                        docker push ${DOCKER_REPO}:${IMAGE_TAG}
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh '''
+                    echo "Starting Kubernetes deployment..."
+
+                    kubectl apply -f k8s/
+
+                    kubectl set image deployment/deployment-2 \
+                        container-2=${DOCKER_REPO}:${IMAGE_TAG} \
+                        -n jenkins
+
+                    kubectl rollout status deployment/deployment-2 \
+                        -n jenkins \
+                        --timeout=5m
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    echo "Checking deployment..."
+
+                    kubectl get deployment deployment-2 -n jenkins
+                    kubectl get pods -n jenkins -o wide
+                    kubectl get svc -n jenkins
+                    kubectl get ingress -n jenkins
+                    kubectl get hpa -n jenkins
+                '''
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo 'Pipeline completed successfully.'
+        }
+
+        failure {
+            echo 'Pipeline failed.'
+        }
+
+        aborted {
+            echo 'Pipeline was aborted.'
+        }
+
+        always {
+            sh '''
+                docker logout || true
+            '''
+        }
+    }
+}
